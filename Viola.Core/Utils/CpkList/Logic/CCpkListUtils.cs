@@ -84,6 +84,94 @@ public static class CCpkListUtils
         return TryDecryptModern(bytes, out var decrypted) && IsT2b(decrypted);
     }
 
+    public static bool TryPackModernCpkList(
+        byte[] bytes,
+        IReadOnlyList<string> localFiles,
+        string rootPath,
+        out byte[] encryptedBytes,
+        Action<string>? log = null,
+        Action<int, int>? progress = null)
+    {
+        encryptedBytes = Array.Empty<byte>();
+        if (!TryDecryptModern(bytes, out var decrypted) || !TryReadT2bFile(decrypted, out var file))
+        {
+            return false;
+        }
+
+        var existingFileMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < file.Entries.Count; i++)
+        {
+            if (!IsCpkListEntry(file.Entries[i]))
+            {
+                continue;
+            }
+
+            string fullPath = ReadT2bString(file.StringData, file.Entries[i].Values[0]) +
+                              ReadT2bString(file.StringData, file.Entries[i].Values[1]);
+            existingFileMap[fullPath] = i;
+        }
+
+        var templateIndex = file.Entries.FindLastIndex(IsCpkListEntry);
+        if (templateIndex < 0)
+        {
+            return false;
+        }
+
+        int processedCount = 0;
+        int totalFiles = localFiles.Count;
+
+        foreach (var localFile in localFiles)
+        {
+            processedCount++;
+            progress?.Invoke(processedCount, totalFiles);
+
+            if (localFile.EndsWith("cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string relativePath = Path.GetRelativePath(rootPath, localFile).Replace("\\", "/");
+            int size = (int)new FileInfo(localFile).Length;
+
+            if (existingFileMap.TryGetValue(relativePath, out int entryIndex))
+            {
+                log?.Invoke($"[Update] {relativePath}");
+                var entry = file.Entries[entryIndex];
+                entry.PendingDir = ReadT2bString(file.StringData, entry.Values[0]);
+                entry.PendingName = ReadT2bString(file.StringData, entry.Values[1]);
+                entry.PendingCpkDir = string.Empty;
+                entry.PendingCpkName = string.Empty;
+                entry.Values[4] = size;
+            }
+            else
+            {
+                log?.Invoke($"[Add] {relativePath}");
+
+                string fileName = Path.GetFileName(relativePath);
+                string dirName = Path.GetDirectoryName(relativePath)?.Replace("\\", "/") ?? string.Empty;
+                if (!string.IsNullOrEmpty(dirName) && !dirName.EndsWith("/"))
+                {
+                    dirName += "/";
+                }
+
+                var newEntry = file.Entries[templateIndex].Clone();
+                newEntry.PendingDir = dirName;
+                newEntry.PendingName = fileName;
+                newEntry.PendingCpkDir = string.Empty;
+                newEntry.PendingCpkName = string.Empty;
+                newEntry.Values[4] = size;
+
+                file.Entries.Add(newEntry);
+                existingFileMap[relativePath] = file.Entries.Count - 1;
+            }
+        }
+
+        UpdateT2bCountEntry(file);
+        var packedBytes = WriteT2bFile(file);
+        encryptedBytes = EncryptModern(packedBytes);
+        return encryptedBytes.Length > 0;
+    }
+
     private static bool TryDecryptModern(byte[] bytes, out byte[] decrypted)
     {
         decrypted = Array.Empty<byte>();
@@ -114,6 +202,23 @@ public static class CCpkListUtils
             decrypted = Array.Empty<byte>();
             return false;
         }
+    }
+
+    private static byte[] EncryptModern(byte[] bytes)
+    {
+        var key = (byte[])ModernEncryptedKey.Clone();
+        var iv = (byte[])ModernEncryptedIv.Clone();
+        CCriwareCrypt.DecryptBlock(key, 0, ModernKeyScrambleKey);
+        CCriwareCrypt.DecryptBlock(iv, 0, ModernIvScrambleKey);
+
+        using var aes = Aes.Create();
+        aes.Key = key;
+        aes.IV = iv;
+        aes.Mode = CipherMode.CBC;
+        aes.Padding = PaddingMode.PKCS7;
+
+        using var encryptor = aes.CreateEncryptor();
+        return encryptor.TransformFinalBlock(bytes, 0, bytes.Length);
     }
 
     private static bool TryReadCfgBinEntries(byte[] bytes, out List<CpkListEntry> entries)
@@ -171,6 +276,49 @@ public static class CCpkListUtils
     private static bool TryReadT2bEntries(byte[] bytes, out List<CpkListEntry> entries)
     {
         entries = new List<CpkListEntry>();
+        if (!TryReadT2bFile(bytes, out var file))
+        {
+            return false;
+        }
+
+        try
+        {
+            foreach (var entry in file.Entries)
+            {
+                if (!IsCpkListEntry(entry))
+                {
+                    continue;
+                }
+
+                string dir = ReadT2bString(file.StringData, entry.Values[0]);
+                string name = ReadT2bString(file.StringData, entry.Values[1]);
+                string cpkDir = ReadT2bString(file.StringData, entry.Values[2]);
+                string cpkName = ReadT2bString(file.StringData, entry.Values[3]);
+                if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name))
+                {
+                    continue;
+                }
+
+                entries.Add(new CpkListEntry
+                {
+                    FullPath = dir + name,
+                    CpkPath = BuildCpkPath(cpkDir, cpkName),
+                    Size = entry.Values[4]
+                });
+            }
+
+            return entries.Count > 0;
+        }
+        catch
+        {
+            entries.Clear();
+            return false;
+        }
+    }
+
+    private static bool TryReadT2bFile(byte[] bytes, out T2bFile file)
+    {
+        file = new T2bFile();
         if (!IsT2b(bytes))
         {
             return false;
@@ -184,17 +332,22 @@ public static class CCpkListUtils
             uint entryCount = reader.ReadUInt32();
             uint stringOffset = reader.ReadUInt32();
             uint stringSize = reader.ReadUInt32();
-            reader.ReadUInt32();
+            uint stringCount = reader.ReadUInt32();
 
             if (stringOffset > bytes.Length || stringSize > bytes.Length - stringOffset)
             {
                 return false;
             }
 
-            var stringData = bytes[(int)stringOffset..(int)(stringOffset + stringSize)];
-            for (uint index = 0; index < entryCount && stream.Position < stringOffset; index++)
+            var entries = new List<T2bRawEntry>(checked((int)entryCount));
+            for (uint index = 0; index < entryCount; index++)
             {
-                reader.ReadUInt32();
+                if (stream.Position >= stringOffset)
+                {
+                    return false;
+                }
+
+                uint crc32 = reader.ReadUInt32();
                 int valueCount = reader.ReadByte();
                 var types = ReadT2bTypes(reader, valueCount);
                 var values = new int[valueCount];
@@ -203,34 +356,122 @@ public static class CCpkListUtils
                     values[i] = reader.ReadInt32();
                 }
 
-                if (valueCount < 5 || types[0] != 0 || types[1] != 0 || types[2] != 0 || types[3] != 0 || types[4] != 1)
-                {
-                    continue;
-                }
-
-                string dir = ReadT2bString(stringData, values[0]);
-                string name = ReadT2bString(stringData, values[1]);
-                string cpkDir = ReadT2bString(stringData, values[2]);
-                string cpkName = ReadT2bString(stringData, values[3]);
-                if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(name))
-                {
-                    continue;
-                }
-
-                entries.Add(new CpkListEntry
-                {
-                    FullPath = dir + name,
-                    CpkPath = BuildCpkPath(cpkDir, cpkName),
-                    Size = values[4]
-                });
+                entries.Add(new T2bRawEntry(crc32, types, values));
             }
 
-            return entries.Count > 0;
+            long tailOffset = AlignValue(stringOffset + stringSize, 16);
+            if (tailOffset > bytes.Length)
+            {
+                return false;
+            }
+
+            file = new T2bFile
+            {
+                Entries = entries,
+                StringData = bytes[(int)stringOffset..(int)(stringOffset + stringSize)],
+                StringCount = stringCount,
+                Tail = bytes[(int)tailOffset..]
+            };
+
+            return true;
         }
         catch
         {
-            entries.Clear();
+            file = new T2bFile();
             return false;
+        }
+    }
+
+    private static byte[] WriteT2bFile(T2bFile file)
+    {
+        var strings = new MemoryStream();
+        var stringOffsets = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        int AddString(string value)
+        {
+            if (stringOffsets.TryGetValue(value, out int offset))
+            {
+                return offset;
+            }
+
+            offset = checked((int)strings.Position);
+            var encoded = Encoding.UTF8.GetBytes(value);
+            strings.Write(encoded, 0, encoded.Length);
+            strings.WriteByte(0);
+            stringOffsets[value] = offset;
+            return offset;
+        }
+
+        foreach (var entry in file.Entries)
+        {
+            for (int i = 0; i < entry.Types.Length; i++)
+            {
+                if (entry.Types[i] != 0)
+                {
+                    continue;
+                }
+
+                string value = entry.GetPendingString(i) ?? ReadT2bString(file.StringData, entry.Values[i]);
+                entry.Values[i] = AddString(value);
+            }
+        }
+
+        using var output = new MemoryStream();
+        using var writer = new BinaryWriter(output, Encoding.UTF8, leaveOpen: true);
+
+        writer.Write((uint)file.Entries.Count);
+        writer.Write(0u);
+        writer.Write(0u);
+        writer.Write((uint)stringOffsets.Count);
+
+        foreach (var entry in file.Entries)
+        {
+            writer.Write(entry.Crc32);
+            writer.Write((byte)entry.Types.Length);
+            WriteT2bTypes(writer, entry.Types);
+            Align(output, 4);
+            foreach (int value in entry.Values)
+            {
+                writer.Write(value);
+            }
+        }
+
+        uint stringOffset = checked((uint)output.Position);
+        var stringData = strings.ToArray();
+        writer.Write(stringData);
+        Align(output, 16);
+        writer.Write(file.Tail);
+
+        output.Position = 4;
+        writer.Write(stringOffset);
+        writer.Write((uint)stringData.Length);
+        writer.Write((uint)stringOffsets.Count);
+
+        return output.ToArray();
+    }
+
+    private static bool IsCpkListEntry(T2bRawEntry entry)
+    {
+        return entry.Values.Length >= 5 &&
+               entry.Types.Length >= 5 &&
+               entry.Types[0] == 0 &&
+               entry.Types[1] == 0 &&
+               entry.Types[2] == 0 &&
+               entry.Types[3] == 0 &&
+               entry.Types[4] == 1;
+    }
+
+    private static void UpdateT2bCountEntry(T2bFile file)
+    {
+        if (file.Entries.Count == 0)
+        {
+            return;
+        }
+
+        var firstEntry = file.Entries[0];
+        if (firstEntry.Values.Length == 1 && firstEntry.Types.Length == 1 && firstEntry.Types[0] == 1)
+        {
+            firstEntry.Values[0] = file.Entries.Count(entry => IsCpkListEntry(entry));
         }
     }
 
@@ -255,6 +496,20 @@ public static class CCpkListUtils
         return types;
     }
 
+    private static void WriteT2bTypes(BinaryWriter writer, byte[] types)
+    {
+        for (int index = 0; index < types.Length; index += 4)
+        {
+            byte chunk = 0;
+            for (int nibble = 0; nibble < 4 && index + nibble < types.Length; nibble++)
+            {
+                chunk |= (byte)((types[index + nibble] & 0x3) << (nibble * 2));
+            }
+
+            writer.Write(chunk);
+        }
+    }
+
     private static string ReadT2bString(byte[] stringData, int offset)
     {
         if (offset < 0 || offset >= stringData.Length)
@@ -273,7 +528,22 @@ public static class CCpkListUtils
 
     private static void Align(Stream stream, int alignment)
     {
-        stream.Position = (stream.Position + alignment - 1) & ~(alignment - 1);
+        long aligned = AlignValue(stream.Position, alignment);
+        if (!stream.CanWrite)
+        {
+            stream.Position = aligned;
+            return;
+        }
+
+        while (stream.Position < aligned)
+        {
+            stream.WriteByte(0);
+        }
+    }
+
+    private static long AlignValue(long value, int alignment)
+    {
+        return (value + alignment - 1) & ~(alignment - 1);
     }
 
     private static string BuildCpkPath(string cpkDir, string cpkName)
@@ -285,5 +555,48 @@ public static class CCpkListUtils
 
         string cpkPath = Path.Combine(cpkDir, cpkName).Replace("\\", "/");
         return cpkPath.StartsWith("/") ? cpkPath[1..] : cpkPath;
+    }
+
+    private sealed class T2bFile
+    {
+        public List<T2bRawEntry> Entries { get; init; } = new();
+        public byte[] StringData { get; init; } = Array.Empty<byte>();
+        public uint StringCount { get; init; }
+        public byte[] Tail { get; init; } = Array.Empty<byte>();
+    }
+
+    private sealed class T2bRawEntry
+    {
+        public T2bRawEntry(uint crc32, byte[] types, int[] values)
+        {
+            Crc32 = crc32;
+            Types = types;
+            Values = values;
+        }
+
+        public uint Crc32 { get; }
+        public byte[] Types { get; }
+        public int[] Values { get; }
+        public string? PendingDir { get; set; }
+        public string? PendingName { get; set; }
+        public string? PendingCpkDir { get; set; }
+        public string? PendingCpkName { get; set; }
+
+        public T2bRawEntry Clone()
+        {
+            return new T2bRawEntry(Crc32, (byte[])Types.Clone(), (int[])Values.Clone());
+        }
+
+        public string? GetPendingString(int index)
+        {
+            return index switch
+            {
+                0 => PendingDir,
+                1 => PendingName,
+                2 => PendingCpkDir,
+                3 => PendingCpkName,
+                _ => null
+            };
+        }
     }
 }

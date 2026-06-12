@@ -51,15 +51,37 @@ class CPack
         byte[] originalFileBytes = File.ReadAllBytes(cpkListInputPath);
         byte[] fileBytes = originalFileBytes;
         bool wasEncrypted = false;
+        var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
+        string outputModFolder = _options.OutputPath;
+        string outputConfigPath = (_options.PackPlatform == DataClasses.Platform.SWITCH)
+            ? Path.Combine(outputModFolder, "romfs", "data", "cpk_list.cfg.bin")
+            : Path.Combine(outputModFolder, "data", "cpk_list.cfg.bin");
 
-        if (!CCpkListUtils.TryGetCfgBinPayload(fileBytes, out fileBytes, out wasEncrypted))
+        outputConfigPath = outputConfigPath.Replace("\\", "/");
+        Directory.CreateDirectory(Path.GetDirectoryName(outputConfigPath)!);
+
+        if (CCpkListUtils.IsModernCpkList(originalFileBytes))
         {
-            if (CCpkListUtils.IsModernCpkList(originalFileBytes))
+            CLogger.LogInfo("Decrypting modern T2B config...");
+            if (!CCpkListUtils.TryPackModernCpkList(
+                    originalFileBytes,
+                    localFiles,
+                    _dirToPack,
+                    out var modernSavedBytes,
+                    CLogger.LogInfo,
+                    (current, total) => CGeneralUtils.ReportProgress(current, total, "Updating Config")))
             {
-                CLogger.AddImportantInfo("This cpk_list.cfg.bin uses the new T2B format. Packing with this format is not supported yet.");
+                CLogger.AddImportantInfo("Failed to update modern T2B cpk_list.cfg.bin.");
                 return;
             }
 
+            CLogger.LogInfo("Re-encrypting modern T2B config...");
+            File.WriteAllBytes(outputConfigPath, modernSavedBytes);
+            goto CopyFiles;
+        }
+
+        if (!CCpkListUtils.TryGetCfgBinPayload(fileBytes, out fileBytes, out wasEncrypted))
+        {
             CLogger.AddImportantInfo("Invalid CfgBin structure: No entries found.");
             return;
         }
@@ -91,8 +113,6 @@ class CPack
 
             existingFileMap[fullPath] = i;
         }
-
-        var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
         
         Entry? templateEntry = cpkItems.Count > 0 ? cpkItems[cpkItems.Count - 1] : null;
 
@@ -148,14 +168,6 @@ class CPack
 
         cpkList.Entries[0].Variables[0].Value = cpkItems.Count;
 
-        string outputModFolder = _options.OutputPath;
-        string outputConfigPath = (_options.PackPlatform == DataClasses.Platform.SWITCH)
-            ? Path.Combine(outputModFolder, "romfs", "data", "cpk_list.cfg.bin")
-            : Path.Combine(outputModFolder, "data", "cpk_list.cfg.bin");
-
-        outputConfigPath = outputConfigPath.Replace("\\", "/");
-        Directory.CreateDirectory(Path.GetDirectoryName(outputConfigPath)!);
-
         byte[] savedBytes = cpkList.Save();
 
         if (wasEncrypted)
@@ -166,6 +178,7 @@ class CPack
 
         File.WriteAllBytes(outputConfigPath, savedBytes);
 
+    CopyFiles:
         CLogger.LogInfo("Copying files...");
 
         string destRoot = (_options.PackPlatform == DataClasses.Platform.SWITCH)
