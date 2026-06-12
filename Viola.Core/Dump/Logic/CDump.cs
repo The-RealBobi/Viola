@@ -8,6 +8,7 @@ using Viola.Core.ViolaLogger.Logic;
 using Viola.Core.Settings.Logic;
 using Tinifan.Level5.Binary;
 using System.Runtime;
+using Viola.Core.Utils.CpkList.Logic;
 
 namespace Viola.Core.Dump.Logic;
 
@@ -94,40 +95,23 @@ class CDump
             {
                 CLogger.LogInfo($"Loading Smart Dump data from {Path.GetFileName(cpkListPath)}...");
                 byte[] fileBytes = File.ReadAllBytes(cpkListPath);
-                uint checkHeader = BitConverter.ToUInt32(fileBytes, 0);
-                if (checkHeader > 10000000)
-                {
-                    CCriwareCrypt.DecryptBlock(fileBytes, 0, 0x1717E18E);
-                }
 
-                CfgBin cpkList = new CfgBin();
-                cpkList.Open(fileBytes);
-
-                if (cpkList.Entries.Count > 0 && cpkList.Entries[0].Children != null)
+                if (CCpkListUtils.TryReadEntries(fileBytes, out var cpkListEntries))
                 {
                     _smartDumpSizes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                     _cpkContents = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
-                    foreach (var item in cpkList.Entries[0].Children)
+                    foreach (var item in cpkListEntries)
                     {
-                        string dir = (string)item.Variables[0].Value;
-                        string name = (string)item.Variables[1].Value;
-                        string fullPath = dir + name;
-                        int size = (int)item.Variables[4].Value;
-                        _smartDumpSizes[fullPath] = size;
+                        _smartDumpSizes[item.FullPath] = item.Size;
 
-                        string cpkDir = (string)item.Variables[2].Value;
-                        string cpkName = (string)item.Variables[3].Value;
-                        if (!string.IsNullOrEmpty(cpkName))
+                        if (!string.IsNullOrEmpty(item.CpkPath))
                         {
-                            string cpkPath = Path.Combine(cpkDir, cpkName).Replace("\\", "/");
-                            if (cpkPath.StartsWith("/")) cpkPath = cpkPath[1..];
-                            
-                            if (!_cpkContents.ContainsKey(cpkPath))
+                            if (!_cpkContents.ContainsKey(item.CpkPath))
                             {
-                                _cpkContents[cpkPath] = new List<string>();
+                                _cpkContents[item.CpkPath] = new List<string>();
                             }
-                            _cpkContents[cpkPath].Add(fullPath);
+                            _cpkContents[item.CpkPath].Add(item.FullPath);
                         }
                     }
                     CLogger.LogInfo($"Smart Dump enabled. Loaded {_smartDumpSizes.Count} file entries.");

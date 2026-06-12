@@ -4,6 +4,7 @@ using Viola.Core.Launcher.DataClasses;
 using Viola.Core.Utils.General.Logic;
 using Viola.Core.ViolaLogger.Logic;
 using Viola.Core.EncryptDecrypt.Logic.Utils;
+using Viola.Core.Utils.CpkList.Logic;
 
 namespace Viola.Core.Pack.Logic;
 
@@ -47,15 +48,25 @@ class CPack
 
         CLogger.LogInfo("Processing cpk_list.cfg.bin...");
 
-        byte[] fileBytes = File.ReadAllBytes(cpkListInputPath);
+        byte[] originalFileBytes = File.ReadAllBytes(cpkListInputPath);
+        byte[] fileBytes = originalFileBytes;
         bool wasEncrypted = false;
 
-        uint checkHeader = BitConverter.ToUInt32(fileBytes, 0);
-        if (checkHeader > 10000000)
+        if (!CCpkListUtils.TryGetCfgBinPayload(fileBytes, out fileBytes, out wasEncrypted))
         {
-            wasEncrypted = true;
+            if (CCpkListUtils.IsModernCpkList(originalFileBytes))
+            {
+                CLogger.AddImportantInfo("This cpk_list.cfg.bin uses the new T2B format. Packing with this format is not supported yet.");
+                return;
+            }
+
+            CLogger.AddImportantInfo("Invalid CfgBin structure: No entries found.");
+            return;
+        }
+
+        if (wasEncrypted)
+        {
             CLogger.LogInfo("Decrypting config...");
-            CCriwareCrypt.DecryptBlock(fileBytes, 0, 0x1717E18E);
         }
 
         CfgBin cpkList = new CfgBin();
