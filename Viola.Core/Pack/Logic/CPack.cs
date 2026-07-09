@@ -51,6 +51,7 @@ class CPack
         byte[] originalFileBytes = File.ReadAllBytes(cpkListInputPath);
         byte[] fileBytes = originalFileBytes;
         bool wasEncrypted = false;
+        LogIgnoredJunkFiles();
         var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
         string outputModFolder = _options.OutputPath;
         string outputConfigPath = (_options.PackPlatform == DataClasses.Platform.SWITCH)
@@ -251,5 +252,30 @@ class CPack
         }
 
         return packs;
+    }
+
+    private void LogIgnoredJunkFiles()
+    {
+        var ignored = Directory.EnumerateFiles(_dirToPack, "*", SearchOption.AllDirectories)
+            .Where(CGeneralUtils.IsJunkFile)
+            .Select(file => Path.GetRelativePath(_dirToPack, file).Replace("\\", "/"))
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (ignored.Count == 0)
+        {
+            return;
+        }
+
+        CLogger.LogInfo($"Ignoring {ignored.Count} junk file(s).");
+        foreach (var file in ignored.Take(5))
+        {
+            CLogger.LogInfo($"[Ignore] {file}");
+        }
+
+        if (ignored.Count > 5)
+        {
+            CLogger.LogInfo($"[Ignore] ... {ignored.Count - 5} more");
+        }
     }
 }
