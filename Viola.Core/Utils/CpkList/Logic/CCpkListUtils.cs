@@ -117,6 +117,7 @@ public static class CCpkListUtils
             return false;
         }
 
+        var customPacks = FindCustomPacks(localFiles, rootPath);
         int processedCount = 0;
         int totalFiles = localFiles.Count;
 
@@ -131,6 +132,11 @@ public static class CCpkListUtils
             }
 
             string relativePath = Path.GetRelativePath(rootPath, localFile).Replace("\\", "/");
+            if (IsCustomPack(relativePath))
+            {
+                continue;
+            }
+
             int size = (int)new FileInfo(localFile).Length;
 
             if (existingFileMap.TryGetValue(relativePath, out int entryIndex))
@@ -139,8 +145,17 @@ public static class CCpkListUtils
                 var entry = file.Entries[entryIndex];
                 entry.PendingDir = ReadT2bString(file.StringData, entry.Values[0]);
                 entry.PendingName = ReadT2bString(file.StringData, entry.Values[1]);
-                entry.PendingCpkDir = string.Empty;
-                entry.PendingCpkName = string.Empty;
+                var cpkName = ReadT2bString(file.StringData, entry.Values[3]);
+                if (customPacks.Contains(cpkName))
+                {
+                    entry.PendingCpkDir = "data/packs_custom/";
+                    entry.PendingCpkName = cpkName;
+                }
+                else
+                {
+                    entry.PendingCpkDir = string.Empty;
+                    entry.PendingCpkName = string.Empty;
+                }
                 entry.Values[4] = size;
             }
             else
@@ -555,6 +570,27 @@ public static class CCpkListUtils
 
         string cpkPath = Path.Combine(cpkDir, cpkName).Replace("\\", "/");
         return cpkPath.StartsWith("/") ? cpkPath[1..] : cpkPath;
+    }
+
+    private static bool IsCustomPack(string relativePath)
+    {
+        return relativePath.StartsWith("data/packs_custom/", StringComparison.OrdinalIgnoreCase) &&
+               relativePath.EndsWith(".cpk", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static HashSet<string> FindCustomPacks(IReadOnlyList<string> localFiles, string rootPath)
+    {
+        var packs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var localFile in localFiles)
+        {
+            string relativePath = Path.GetRelativePath(rootPath, localFile).Replace("\\", "/");
+            if (IsCustomPack(relativePath))
+            {
+                packs.Add(Path.GetFileName(relativePath));
+            }
+        }
+
+        return packs;
     }
 
     private sealed class T2bFile
