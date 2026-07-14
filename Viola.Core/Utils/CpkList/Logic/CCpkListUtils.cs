@@ -90,7 +90,8 @@ public static class CCpkListUtils
         string rootPath,
         out byte[] encryptedBytes,
         Action<string>? log = null,
-        Action<int, int>? progress = null)
+        Action<int, int>? progress = null,
+        IReadOnlySet<string>? additionalCustomPacks = null)
     {
         encryptedBytes = Array.Empty<byte>();
         if (!TryDecryptModern(bytes, out var decrypted) || !TryReadT2bFile(decrypted, out var file))
@@ -118,6 +119,10 @@ public static class CCpkListUtils
         }
 
         var customPacks = FindCustomPacks(localFiles, rootPath);
+        if (additionalCustomPacks is not null)
+        {
+            customPacks.UnionWith(additionalCustomPacks);
+        }
         int processedCount = 0;
         int totalFiles = localFiles.Count;
 

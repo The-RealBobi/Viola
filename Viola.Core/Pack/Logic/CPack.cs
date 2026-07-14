@@ -4,6 +4,7 @@ using Viola.Core.Launcher.DataClasses;
 using Viola.Core.Utils.General.Logic;
 using Viola.Core.ViolaLogger.Logic;
 using Viola.Core.EncryptDecrypt.Logic.Utils;
+using Viola.Core.Utils.Cpk.Logic;
 using Viola.Core.Utils.CpkList.Logic;
 
 namespace Viola.Core.Pack.Logic;
@@ -53,13 +54,18 @@ class CPack
         bool wasEncrypted = false;
         LogIgnoredJunkFiles();
         var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
+        var userCustomPacks = FindCustomPacks(localFiles);
         string outputModFolder = _options.OutputPath;
+        string destRoot = (_options.PackPlatform == DataClasses.Platform.SWITCH)
+             ? Path.Combine(outputModFolder, "romfs")
+             : outputModFolder;
         string outputConfigPath = (_options.PackPlatform == DataClasses.Platform.SWITCH)
             ? Path.Combine(outputModFolder, "romfs", "data", "cpk_list.cfg.bin")
             : Path.Combine(outputModFolder, "data", "cpk_list.cfg.bin");
 
         outputConfigPath = outputConfigPath.Replace("\\", "/");
         Directory.CreateDirectory(Path.GetDirectoryName(outputConfigPath)!);
+        var autoPackedAudio = BuildAutoPackedAudio(originalFileBytes, localFiles, userCustomPacks);
 
         if (CCpkListUtils.IsModernCpkList(originalFileBytes))
         {
@@ -70,7 +76,8 @@ class CPack
                     _dirToPack,
                     out var modernSavedBytes,
                     CLogger.LogInfo,
-                    (current, total) => CGeneralUtils.ReportProgress(current, total, "Updating Config")))
+                    (current, total) => CGeneralUtils.ReportProgress(current, total, "Updating Config"),
+                    autoPackedAudio.CustomPackNames))
             {
                 CLogger.AddImportantInfo("Failed to update modern T2B cpk_list.cfg.bin.");
                 return;
@@ -119,7 +126,8 @@ class CPack
 
         int processedCount = 0;
         int totalFiles = localFiles.Count;
-        var customPacks = FindCustomPacks(localFiles);
+        var customPacks = new HashSet<string>(userCustomPacks, StringComparer.OrdinalIgnoreCase);
+        customPacks.UnionWith(autoPackedAudio.CustomPackNames);
 
         foreach (var file in localFiles)
         {
@@ -191,13 +199,13 @@ class CPack
         File.WriteAllBytes(outputConfigPath, savedBytes);
 
     CopyFiles:
+        WriteAutoPackedAudio(destRoot, autoPackedAudio);
         CLogger.LogInfo("Copying files...");
 
-        string destRoot = (_options.PackPlatform == DataClasses.Platform.SWITCH)
-             ? Path.Combine(outputModFolder, "romfs")
-             : outputModFolder;
-
-        var filesToCopy = localFiles.Where(f => !f.EndsWith("data/cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase)).ToList();
+        var filesToCopy = localFiles
+            .Where(f => !f.EndsWith("data/cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !autoPackedAudio.SourceFiles.Contains(f))
+            .ToList();
 
         var distinctDirectories = filesToCopy
             .Select(f => Path.GetDirectoryName(Path.Combine(destRoot, Path.GetRelativePath(_dirToPack, f))))
@@ -254,6 +262,68 @@ class CPack
         return packs;
     }
 
+    private AutoPackedAudio BuildAutoPackedAudio(byte[] cpkListBytes, IReadOnlyList<string> localFiles, IReadOnlySet<string> userCustomPacks)
+    {
+        var result = new AutoPackedAudio();
+        if (!CCpkListUtils.TryReadEntries(cpkListBytes, out var entries))
+        {
+            return result;
+        }
+
+        var cpkByPath = entries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.CpkPath))
+            .ToDictionary(entry => NormalizeRelativePath(entry.FullPath), entry => entry.CpkPath, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var localFile in localFiles)
+        {
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(_dirToPack, localFile));
+            if (!IsAutoPackedAudioFile(relativePath) || !cpkByPath.TryGetValue(relativePath, out var cpkPath))
+            {
+                continue;
+            }
+
+            var cpkName = Path.GetFileName(cpkPath.Replace("\\", "/"));
+            if (string.IsNullOrWhiteSpace(cpkName) || userCustomPacks.Contains(cpkName))
+            {
+                continue;
+            }
+
+            if (!result.FilesByCpk.TryGetValue(cpkName, out var files))
+            {
+                files = new List<CpkFilePayload>();
+                result.FilesByCpk.Add(cpkName, files);
+            }
+
+            files.Add(new CpkFilePayload(relativePath, localFile));
+            result.SourceFiles.Add(localFile);
+            result.CustomPackNames.Add(cpkName);
+        }
+
+        return result;
+    }
+
+    private static void WriteAutoPackedAudio(string destRoot, AutoPackedAudio audio)
+    {
+        foreach (var (cpkName, files) in audio.FilesByCpk)
+        {
+            var outputPath = Path.Combine(destRoot, "data", "packs_custom", cpkName);
+            CLogger.LogInfo($"[Pack] data/packs_custom/{cpkName} ({files.Count} audio file(s))");
+            CSimpleCpkWriter.Write(outputPath, files);
+        }
+    }
+
+    private static bool IsAutoPackedAudioFile(string relativePath)
+    {
+        return relativePath.StartsWith("data/common/sound_asset/", StringComparison.OrdinalIgnoreCase) &&
+               (relativePath.EndsWith(".acb", StringComparison.OrdinalIgnoreCase) ||
+                relativePath.EndsWith(".awb", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeRelativePath(string path)
+    {
+        return path.Replace("\\", "/");
+    }
+
     private void LogIgnoredJunkFiles()
     {
         var ignored = Directory.EnumerateFiles(_dirToPack, "*", SearchOption.AllDirectories)
@@ -277,5 +347,12 @@ class CPack
         {
             CLogger.LogInfo($"[Ignore] ... {ignored.Count - 5} more");
         }
+    }
+
+    private sealed class AutoPackedAudio
+    {
+        public Dictionary<string, List<CpkFilePayload>> FilesByCpk { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> SourceFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> CustomPackNames { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 }
