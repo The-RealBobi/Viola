@@ -5,7 +5,7 @@ using System.Text;
 namespace Viola.Core.Utils.General.Logic;
 public class CGeneralUtils
 {
-    public const string APP_VERSION = "1.4.2";
+    public const string APP_VERSION = "1.4.3";
     public static bool isConsole = true;
     public static event Action<long, long, string>? OnProgress;
     private static readonly HashSet<string> JunkFileNames = new(StringComparer.OrdinalIgnoreCase)
