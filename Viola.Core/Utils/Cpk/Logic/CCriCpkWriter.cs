@@ -5,7 +5,7 @@ namespace Viola.Core.Utils.Cpk.Logic;
 
 internal sealed record CpkFilePayload(string RelativePath, string SourcePath);
 
-internal static class CSimpleCpkWriter
+internal static class CCriCpkWriter
 {
     private const int Alignment = 0x800;
     private const ulong NoOffset = 0xFFFFFFFFFFFFFFFF;
@@ -18,9 +18,7 @@ internal static class CSimpleCpkWriter
             .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        var tocPacketSize = EstimateTocPacketSize(orderedFiles);
-        var tocOffset = (long)Alignment;
-        var contentOffset = Align(tocOffset + tocPacketSize, Alignment);
+        var contentOffset = (long)Alignment;
         var offsets = new List<long>(orderedFiles.Count);
         var cursor = contentOffset;
 
@@ -30,59 +28,63 @@ internal static class CSimpleCpkWriter
             offsets.Add(cursor);
             cursor += new FileInfo(file.SourcePath).Length;
         }
+        var tocOffset = Align(cursor, Alignment);
 
         var cpkTable = UtfTable.Create("CpkHeader")
-            .AddPerRow("UpdateDateTime", UtfType.UInt64)
-            .AddPerRow("FileSize", UtfType.UInt64)
-            .AddPerRow("ContentOffset", UtfType.UInt64)
-            .AddPerRow("TocOffset", UtfType.UInt64)
-            .AddPerRow("EtocOffset", UtfType.UInt64)
-            .AddPerRow("ItocOffset", UtfType.UInt64)
-            .AddPerRow("GtocOffset", UtfType.UInt64)
-            .AddPerRow("Files", UtfType.UInt32)
-            .AddPerRow("Groups", UtfType.UInt32)
-            .AddPerRow("Attrs", UtfType.UInt32)
-            .AddPerRow("TotalFiles", UtfType.UInt32)
-            .AddPerRow("Directories", UtfType.UInt32)
-            .AddPerRow("Updates", UtfType.UInt32)
-            .AddPerRow("Version", UtfType.UInt32)
-            .AddPerRow("Revision", UtfType.UInt32)
-            .AddPerRow("Align", UtfType.UInt16)
-            .AddPerRow("Sorted", UtfType.UInt16)
-            .AddPerRow("EID", UtfType.UInt16)
-            .AddPerRow("CpkMode", UtfType.UInt16)
-            .AddPerRow("Tvers", UtfType.String);
+            .AddPerRow("UpdateDateTime", UtfType.Int64)
+            .AddZero("FileSize", UtfType.Int64)
+            .AddPerRow("ContentOffset", UtfType.Int64)
+            .AddPerRow("ContentSize", UtfType.Int64)
+            .AddPerRow("TocOffset", UtfType.Int64)
+            .AddPerRow("TocSize", UtfType.Int64)
+            .AddZero("TocCrc", UtfType.Int32)
+            .AddPerRow("EtocOffset", UtfType.Int64)
+            .AddPerRow("EtocSize", UtfType.Int64)
+            .AddZero("ItocOffset", UtfType.Int64)
+            .AddZero("ItocSize", UtfType.Int64)
+            .AddZero("ItocCrc", UtfType.Int32)
+            .AddZero("GtocOffset", UtfType.Int64)
+            .AddZero("GtocSize", UtfType.Int64)
+            .AddZero("GtocCrc", UtfType.Int32)
+            .AddPerRow("EnabledPackedSize", UtfType.Int64)
+            .AddPerRow("EnabledDataSize", UtfType.Int64)
+            .AddZero("TotalDataSize", UtfType.Int64)
+            .AddZero("Tocs", UtfType.Int32)
+            .AddPerRow("Files", UtfType.Int32)
+            .AddPerRow("Groups", UtfType.Int32)
+            .AddPerRow("Attrs", UtfType.Int32)
+            .AddZero("TotalFiles", UtfType.Int32)
+            .AddZero("Directories", UtfType.Int32)
+            .AddZero("Updates", UtfType.Int32)
+            .AddPerRow("Version", UtfType.Int16)
+            .AddPerRow("Revision", UtfType.Int16)
+            .AddPerRow("Align", UtfType.Int16)
+            .AddPerRow("Sorted", UtfType.Int16)
+            .AddZero("EID", UtfType.Int16)
+            .AddPerRow("CpkMode", UtfType.Int32)
+            .AddPerRow("Tvers", UtfType.String)
+            .AddZero("Comment", UtfType.String)
+            .AddPerRow("Codec", UtfType.Int32)
+            .AddPerRow("DpkItoc", UtfType.Int32);
 
-        cpkTable.AddRow(
-            0UL,
-            (ulong)cursor,
-            (ulong)contentOffset,
-            (ulong)tocOffset,
-            NoOffset,
-            NoOffset,
-            NoOffset,
-            (uint)orderedFiles.Count,
-            0U,
-            0U,
-            (uint)orderedFiles.Count,
-            (uint)orderedFiles.Select(file => Path.GetDirectoryName(file.RelativePath)?.Replace("\\", "/") ?? string.Empty).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
-            0U,
-            7U,
-            0U,
-            (ushort)Alignment,
-            (ushort)1,
-            (ushort)0,
-            (ushort)0,
-            "Viola");
+        var tocTable = UtfTable.Create("CpkTocInfo");
+        var commonDir = TryGetCommonDirectory(orderedFiles);
+        if (commonDir != null)
+        {
+            tocTable.AddConst("DirName", UtfType.String, commonDir);
+        }
+        else
+        {
+            tocTable.AddPerRow("DirName", UtfType.String);
+        }
 
-        var tocTable = UtfTable.Create("CpkTocInfo")
-            .AddPerRow("DirName", UtfType.String)
+        tocTable
             .AddPerRow("FileName", UtfType.String)
-            .AddPerRow("FileSize", UtfType.UInt64)
-            .AddPerRow("ExtractSize", UtfType.UInt64)
-            .AddPerRow("FileOffset", UtfType.UInt64)
-            .AddPerRow("ID", UtfType.UInt32)
-            .AddPerRow("UserString", UtfType.String);
+            .AddPerRow("FileSize", UtfType.Int32)
+            .AddPerRow("ExtractSize", UtfType.Int32)
+            .AddPerRow("FileOffset", UtfType.Int64)
+            .AddPerRow("ID", UtfType.Int32)
+            .AddConst("UserString", UtfType.String, "<NULL>");
 
         for (var i = 0; i < orderedFiles.Count; i++)
         {
@@ -92,17 +94,62 @@ internal static class CSimpleCpkWriter
             var fileName = Path.GetFileName(relative);
             var size = (ulong)new FileInfo(file.SourcePath).Length;
 
-            tocTable.AddRow(dirName, fileName, size, size, (ulong)(offsets[i] - tocOffset), (uint)i, string.Empty);
+            if (commonDir != null)
+            {
+                tocTable.AddRow(fileName, (uint)size, (uint)size, (ulong)(offsets[i] - contentOffset), (uint)i);
+            }
+            else
+            {
+                tocTable.AddRow(dirName, fileName, (uint)size, (uint)size, (ulong)(offsets[i] - contentOffset), (uint)i);
+            }
         }
 
-        var cpkPacket = WritePacket("CPK ", cpkTable.Build());
+        var etocTable = UtfTable.Create("CpkEtocInfo")
+            .AddInitialString("<NULL>")
+            .AddPerRow("UpdateDateTime", UtfType.Int64)
+            .AddPerRow("LocalDir", UtfType.String);
+
+        foreach (var file in orderedFiles)
+        {
+            var relative = file.RelativePath.Replace("\\", "/");
+            var dirName = Path.GetDirectoryName(relative)?.Replace("\\", "/") ?? string.Empty;
+            etocTable.AddRow(570276038271829760UL, dirName);
+        }
+        etocTable.AddRow(0UL, string.Empty);
+
         var tocPacket = WritePacket("TOC ", tocTable.Build());
+        var etocPacket = WritePacket("ETOC", etocTable.Build());
+        var etocOffset = Align(tocOffset + tocPacket.Length, Alignment);
+        var finalSize = etocOffset + etocPacket.Length;
+        var contentSize = tocOffset - contentOffset;
+        var enabledSize = (ulong)orderedFiles.Sum(file => new FileInfo(file.SourcePath).Length);
+
+        cpkTable.AddRow(
+            1UL,
+            (ulong)contentOffset,
+            (ulong)contentSize,
+            (ulong)tocOffset,
+            (ulong)tocPacket.Length,
+            (ulong)etocOffset,
+            (ulong)etocPacket.Length,
+            enabledSize,
+            enabledSize,
+            (uint)orderedFiles.Count,
+            0U,
+            0U,
+            (ushort)7,
+            (ushort)2,
+            (ushort)Alignment,
+            (ushort)1,
+            1U,
+            "N/A, DLL3.11.05",
+            0U,
+            0U);
+
+        var cpkPacket = WritePacket("CPK ", cpkTable.Build());
 
         using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
         output.Write(cpkPacket);
-        PadTo(output, Alignment);
-        output.Position = tocOffset;
-        output.Write(tocPacket);
         PadTo(output, Alignment);
         output.Position = contentOffset;
 
@@ -112,18 +159,18 @@ internal static class CSimpleCpkWriter
             using var input = File.OpenRead(orderedFiles[i].SourcePath);
             input.CopyTo(output);
         }
-    }
 
-    private static int EstimateTocPacketSize(IReadOnlyList<CpkFilePayload> files)
-    {
-        var strings = files.Sum(file => file.RelativePath.Length + 2);
-        return Align(0x100 + files.Count * 0x40 + strings, 0x10) + 0x10;
+        output.Position = tocOffset;
+        output.Write(tocPacket);
+        output.Position = etocOffset;
+        output.Write(etocPacket);
     }
 
     private static byte[] WritePacket(string magic, byte[] utf)
     {
         var packet = new byte[0x10 + utf.Length];
         Encoding.ASCII.GetBytes(magic, packet);
+        packet[4] = 0xFF;
         BinaryPrimitives.WriteUInt64LittleEndian(packet.AsSpan(8), (ulong)utf.Length);
         utf.CopyTo(packet.AsSpan(0x10));
         return packet;
@@ -139,6 +186,28 @@ internal static class CSimpleCpkWriter
         return (value + alignment - 1) / alignment * alignment;
     }
 
+    private static string? TryGetCommonDirectory(IReadOnlyList<CpkFilePayload> files)
+    {
+        string? commonDir = null;
+        foreach (var file in files)
+        {
+            var relative = file.RelativePath.Replace("\\", "/");
+            var dirName = Path.GetDirectoryName(relative)?.Replace("\\", "/") ?? string.Empty;
+            if (commonDir == null)
+            {
+                commonDir = dirName;
+                continue;
+            }
+
+            if (!commonDir.Equals(dirName, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+        }
+
+        return commonDir;
+    }
+
     private static void PadTo(Stream stream, int alignment)
     {
         var aligned = Align(stream.Position, alignment);
@@ -150,14 +219,18 @@ internal static class CSimpleCpkWriter
 
     private enum UtfStorage : byte
     {
+        Zero = 0x10,
         Const = 0x30,
         PerRow = 0x50
     }
 
     private enum UtfType : byte
     {
+        Int16 = 0x02,
         UInt16 = 0x03,
+        Int32 = 0x04,
         UInt32 = 0x05,
+        Int64 = 0x06,
         UInt64 = 0x07,
         String = 0x0A
     }
@@ -175,6 +248,7 @@ internal static class CSimpleCpkWriter
         private readonly string _name;
         private readonly List<UtfColumn> _columns = new();
         private readonly List<object?[]> _rows = new();
+        private readonly List<string> _initialStrings = new();
 
         private UtfTable(string name)
         {
@@ -183,9 +257,21 @@ internal static class CSimpleCpkWriter
 
         public static UtfTable Create(string name) => new(name);
 
+        public UtfTable AddInitialString(string value)
+        {
+            _initialStrings.Add(value);
+            return this;
+        }
+
         public UtfTable AddConst(string name, UtfType type, object value)
         {
             _columns.Add(new UtfColumn { Name = name, Type = type, Storage = UtfStorage.Const, ConstValue = value });
+            return this;
+        }
+
+        public UtfTable AddZero(string name, UtfType type)
+        {
+            _columns.Add(new UtfColumn { Name = name, Type = type, Storage = UtfStorage.Zero });
             return this;
         }
 
@@ -206,6 +292,10 @@ internal static class CSimpleCpkWriter
             var columnBytes = new MemoryStream();
             var rowBytes = new MemoryStream();
             var strings = new StringTable();
+            foreach (var value in _initialStrings)
+            {
+                strings.Add(value);
+            }
             strings.Add(_name);
 
             foreach (var column in _columns)
@@ -235,6 +325,12 @@ internal static class CSimpleCpkWriter
             var rowsOffset = 0x20 + columnBytes.Length;
             var stringsOffset = rowsOffset + rowBytes.Length;
             var stringBytes = strings.Build();
+            var unpaddedSize = stringsOffset + stringBytes.Length;
+            var paddedSize = Align(unpaddedSize, 0x08);
+            if (paddedSize != unpaddedSize)
+            {
+                Array.Resize(ref stringBytes, (int)(paddedSize - stringsOffset));
+            }
             var tableSize = stringsOffset + stringBytes.Length - 8;
             var output = new MemoryStream();
 
@@ -258,8 +354,11 @@ internal static class CSimpleCpkWriter
         {
             return type switch
             {
+                UtfType.Int16 => 2,
                 UtfType.UInt16 => 2,
+                UtfType.Int32 => 4,
                 UtfType.UInt32 => 4,
+                UtfType.Int64 => 8,
                 UtfType.UInt64 => 8,
                 UtfType.String => 4,
                 _ => throw new NotSupportedException($"Unsupported UTF type {type}")
@@ -270,12 +369,15 @@ internal static class CSimpleCpkWriter
         {
             switch (type)
             {
+                case UtfType.Int16:
                 case UtfType.UInt16:
                     WriteUInt16(stream, Convert.ToUInt16(value));
                     break;
+                case UtfType.Int32:
                 case UtfType.UInt32:
                     WriteUInt32(stream, Convert.ToUInt32(value));
                     break;
+                case UtfType.Int64:
                 case UtfType.UInt64:
                     WriteUInt64(stream, Convert.ToUInt64(value));
                     break;

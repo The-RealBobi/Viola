@@ -77,7 +77,8 @@ class CPack
                     out var modernSavedBytes,
                     CLogger.LogInfo,
                     (current, total) => CGeneralUtils.ReportProgress(current, total, "Updating Config"),
-                    autoPackedAudio.CustomPackNames))
+                    autoPackedAudio.CustomPackNames,
+                    autoPackedAudio.RedirectedPackNames))
             {
                 CLogger.AddImportantInfo("Failed to update modern T2B cpk_list.cfg.bin.");
                 return;
@@ -147,7 +148,12 @@ class CPack
                 var entry = cpkItems[entryIndex];
                 
                 string cpkName = Convert.ToString(entry.Variables[3].Value) ?? string.Empty;
-                if (customPacks.Contains(cpkName))
+                if (autoPackedAudio.RedirectedPackNames.TryGetValue(cpkName, out var redirectedCpkName))
+                {
+                    entry.Variables[2].Value = "data/packs/";
+                    entry.Variables[3].Value = redirectedCpkName;
+                }
+                else if (customPacks.Contains(cpkName))
                 {
                     entry.Variables[2].Value = "data/packs_custom/";
                     entry.Variables[3].Value = cpkName;
@@ -302,6 +308,7 @@ class CPack
             result.SourceFiles.Add(localFile);
             result.CustomPackNames.Add(cpkName);
             result.OriginalCpkPaths.TryAdd(cpkName, ResolveOriginalCpkPath(cpkPath, cpkListInputPath));
+            result.RedirectedPackNames.TryAdd(cpkName, $"{Guid.NewGuid():N}.cpk");
         }
 
         return result;
@@ -311,8 +318,9 @@ class CPack
     {
         foreach (var (cpkName, files) in audio.FilesByCpk)
         {
-            var outputPath = Path.Combine(destRoot, "data", "packs_custom", cpkName);
-            CLogger.LogInfo($"[Pack] data/packs_custom/{cpkName} ({files.Count} audio file(s))");
+            var outputCpkName = audio.RedirectedPackNames.GetValueOrDefault(cpkName) ?? cpkName;
+            var outputPath = Path.Combine(destRoot, "data", "packs", outputCpkName);
+            CLogger.LogInfo($"[Pack] data/packs/{outputCpkName} ({files.Count} audio file(s), source {cpkName})");
             var originalCpkPath = audio.OriginalCpkPaths.GetValueOrDefault(cpkName);
             WriteEncryptedAutoPack(outputPath, files, originalCpkPath);
         }
@@ -328,12 +336,12 @@ class CPack
             CLogger.LogInfo($"[Pack] Using original CPK template: {Path.GetFileName(originalCpkPath)}");
             DecryptCpkIfNeeded(originalCpkPath, decryptedOriginalPath);
             var replacements = files.ToDictionary(file => NormalizeRelativePath(file.RelativePath), file => file.SourcePath, StringComparer.OrdinalIgnoreCase);
-            CFullCpkAudioWriter.Write(decryptedOriginalPath, tempPath, replacements, Path.GetDirectoryName(tempPath)!);
+            CAudioCpkRebuilder.Write(decryptedOriginalPath, tempPath, replacements, Path.GetDirectoryName(tempPath)!);
         }
         else
         {
             CLogger.AddImportantInfo($"Original CPK not found for {Path.GetFileName(outputPath)}. Falling back to compact audio CPK.");
-            CSimpleCpkWriter.Write(tempPath, files);
+            CCriCpkWriter.Write(tempPath, files);
         }
 
         try
@@ -496,6 +504,7 @@ class CPack
     {
         public Dictionary<string, List<CpkFilePayload>> FilesByCpk { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string?> OriginalCpkPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> RedirectedPackNames { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> SourceFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> CustomPackNames { get; } = new(StringComparer.OrdinalIgnoreCase);
     }

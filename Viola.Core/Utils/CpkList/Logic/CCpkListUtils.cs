@@ -91,7 +91,8 @@ public static class CCpkListUtils
         out byte[] encryptedBytes,
         Action<string>? log = null,
         Action<int, int>? progress = null,
-        IReadOnlySet<string>? additionalCustomPacks = null)
+        IReadOnlySet<string>? additionalCustomPacks = null,
+        IReadOnlyDictionary<string, string>? redirectedPacks = null)
     {
         encryptedBytes = Array.Empty<byte>();
         if (!TryDecryptModern(bytes, out var decrypted) || !TryReadT2bFile(decrypted, out var file))
@@ -151,7 +152,12 @@ public static class CCpkListUtils
                 entry.PendingDir = ReadT2bString(file.StringData, entry.Values[0]);
                 entry.PendingName = ReadT2bString(file.StringData, entry.Values[1]);
                 var cpkName = ReadT2bString(file.StringData, entry.Values[3]);
-                if (customPacks.Contains(cpkName))
+                if (redirectedPacks is not null && redirectedPacks.TryGetValue(cpkName, out var redirectedCpkName))
+                {
+                    entry.PendingCpkDir = "data/packs/";
+                    entry.PendingCpkName = redirectedCpkName;
+                }
+                else if (customPacks.Contains(cpkName))
                 {
                     entry.PendingCpkDir = "data/packs_custom/";
                     entry.PendingCpkName = cpkName;

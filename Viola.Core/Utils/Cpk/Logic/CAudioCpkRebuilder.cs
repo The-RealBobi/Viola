@@ -3,7 +3,7 @@ using CriFsV2Lib.Definitions.Structs;
 
 namespace Viola.Core.Utils.Cpk.Logic;
 
-internal static class CFullCpkAudioWriter
+internal static class CAudioCpkRebuilder
 {
     public static void Write(
         string sourceCpkPath,
@@ -28,7 +28,7 @@ internal static class CFullCpkAudioWriter
             foreach (var entry in reader.GetFiles().OrderBy(GetRelativePath, StringComparer.OrdinalIgnoreCase))
             {
                 var relativePath = GetRelativePath(entry);
-                if (replacements.TryGetValue(relativePath, out var replacementPath))
+                if (TryGetReplacement(replacements, relativePath, entry.FileName, out var replacementPath))
                 {
                     payloads.Add(new CpkFilePayload(relativePath, replacementPath));
                     continue;
@@ -44,7 +44,7 @@ internal static class CFullCpkAudioWriter
                 payloads.Add(new CpkFilePayload(relativePath, tempPath));
             }
 
-            CSimpleCpkWriter.Write(outputPath, payloads);
+            CCriCpkWriter.Write(outputPath, payloads);
         }
         finally
         {
@@ -60,5 +60,30 @@ internal static class CFullCpkAudioWriter
         return string.IsNullOrWhiteSpace(file.Directory)
             ? file.FileName.Replace('\\', '/')
             : $"{file.Directory.Replace('\\', '/')}/{file.FileName.Replace('\\', '/')}";
+    }
+
+    private static bool TryGetReplacement(
+        IReadOnlyDictionary<string, string> replacements,
+        string relativePath,
+        string fileName,
+        out string replacementPath)
+    {
+        if (replacements.TryGetValue(relativePath, out replacementPath!))
+        {
+            return true;
+        }
+
+        var matches = replacements
+            .Where(item => Path.GetFileName(item.Key).Equals(fileName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (matches.Count == 1)
+        {
+            replacementPath = matches[0].Value;
+            return true;
+        }
+
+        replacementPath = string.Empty;
+        return false;
     }
 }
