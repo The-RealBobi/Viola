@@ -41,7 +41,13 @@ public class CGeneralUtils
             return true;
         }
 
-        return fileName.StartsWith("._", StringComparison.Ordinal);
+        if (fileName.StartsWith("._", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return fileName.EndsWith("-report.json", StringComparison.OrdinalIgnoreCase) ||
+               fileName.EndsWith(".replacement.hca", StringComparison.OrdinalIgnoreCase);
     }
 
     public static uint ComputeCRC32(byte[] data)

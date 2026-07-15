@@ -13,6 +13,7 @@ internal static class CCriCpkWriter
     public static void Write(string outputPath, IReadOnlyList<CpkFilePayload> files)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        DeleteExistingOutput(outputPath);
 
         var orderedFiles = files
             .OrderBy(file => file.RelativePath, StringComparer.OrdinalIgnoreCase)
@@ -206,6 +207,17 @@ internal static class CCriCpkWriter
         }
 
         return commonDir;
+    }
+
+    private static void DeleteExistingOutput(string outputPath)
+    {
+        if (!File.Exists(outputPath))
+        {
+            return;
+        }
+
+        File.SetAttributes(outputPath, FileAttributes.Normal);
+        File.Delete(outputPath);
     }
 
     private static void PadTo(Stream stream, int alignment)

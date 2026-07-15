@@ -347,6 +347,7 @@ class CPack
         try
         {
             var key = CCriwareCrypt.CalculateFilenameKey(Path.GetFileName(outputPath));
+            DeleteExistingOutput(outputPath);
             using var input = File.OpenRead(tempPath);
             using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
             CCriwareCrypt.ProcessStream(input, output, key);
@@ -363,6 +364,18 @@ class CPack
                 File.Delete(decryptedOriginalPath);
             }
         }
+    }
+
+    private static void DeleteExistingOutput(string outputPath)
+    {
+        if (!File.Exists(outputPath))
+        {
+            return;
+        }
+
+        CLogger.LogInfo($"[Pack] Overwriting existing CPK: {Path.GetFileName(outputPath)}");
+        File.SetAttributes(outputPath, FileAttributes.Normal);
+        File.Delete(outputPath);
     }
 
     private static void DecryptCpkIfNeeded(string sourcePath, string targetPath)
