@@ -308,7 +308,7 @@ class CPack
             result.SourceFiles.Add(localFile);
             result.CustomPackNames.Add(cpkName);
             result.OriginalCpkPaths.TryAdd(cpkName, ResolveOriginalCpkPath(cpkPath, cpkListInputPath));
-            result.RedirectedPackNames.TryAdd(cpkName, $"{Guid.NewGuid():N}.cpk");
+            result.RedirectedPackNames.TryAdd(cpkName, cpkName);
         }
 
         return result;
