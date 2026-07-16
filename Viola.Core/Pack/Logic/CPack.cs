@@ -308,7 +308,6 @@ class CPack
             result.SourceFiles.Add(localFile);
             result.CustomPackNames.Add(cpkName);
             result.OriginalCpkPaths.TryAdd(cpkName, ResolveOriginalCpkPath(cpkPath, cpkListInputPath));
-            result.RedirectedPackNames.TryAdd(cpkName, cpkName);
         }
 
         return result;
@@ -318,9 +317,8 @@ class CPack
     {
         foreach (var (cpkName, files) in audio.FilesByCpk)
         {
-            var outputCpkName = audio.RedirectedPackNames.GetValueOrDefault(cpkName) ?? cpkName;
-            var outputPath = Path.Combine(destRoot, "data", "packs", outputCpkName);
-            CLogger.LogInfo($"[Pack] data/packs/{outputCpkName} ({files.Count} audio file(s), source {cpkName})");
+            var outputPath = Path.Combine(destRoot, "data", "packs_custom", cpkName);
+            CLogger.LogInfo($"[Pack] data/packs_custom/{cpkName} ({files.Count} audio file(s), source {cpkName})");
             var originalCpkPath = audio.OriginalCpkPaths.GetValueOrDefault(cpkName);
             WriteEncryptedAutoPack(outputPath, files, originalCpkPath);
         }
