@@ -5,18 +5,49 @@ using System.Text;
 namespace Viola.Core.Utils.General.Logic;
 public class CGeneralUtils
 {
-    public const string APP_VERSION = "1.4.2";
+    public const string APP_VERSION = "1.4.5";
     public static bool isConsole = true;
     public static event Action<long, long, string>? OnProgress;
+    private static readonly HashSet<string> JunkFileNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".DS_Store",
+        "Thumbs.db",
+        "ehthumbs.db",
+        "desktop.ini",
+        "Icon\r",
+        "._.DS_Store"
+    };
 
     public static List<string> GetAllFilesWithNormalSlash(string folderPath)
     {
         List<string> filePaths = new List<string>();
         foreach (var f in Directory.EnumerateFiles(folderPath, "*", SearchOption.AllDirectories))
         {
+            if (IsJunkFile(f))
+            {
+                continue;
+            }
+
             filePaths.Add(f.Replace("\\", "/"));
         }
         return filePaths;
+    }
+
+    public static bool IsJunkFile(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        if (JunkFileNames.Contains(fileName))
+        {
+            return true;
+        }
+
+        if (fileName.StartsWith("._", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return fileName.EndsWith("-report.json", StringComparison.OrdinalIgnoreCase) ||
+               fileName.EndsWith(".replacement.hca", StringComparison.OrdinalIgnoreCase);
     }
 
     public static uint ComputeCRC32(byte[] data)

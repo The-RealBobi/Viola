@@ -4,6 +4,8 @@ using Viola.Core.Launcher.DataClasses;
 using Viola.Core.Utils.General.Logic;
 using Viola.Core.ViolaLogger.Logic;
 using Viola.Core.EncryptDecrypt.Logic.Utils;
+using Viola.Core.Utils.Cpk.Logic;
+using Viola.Core.Utils.CpkList.Logic;
 
 namespace Viola.Core.Pack.Logic;
 
@@ -47,15 +49,55 @@ class CPack
 
         CLogger.LogInfo("Processing cpk_list.cfg.bin...");
 
-        byte[] fileBytes = File.ReadAllBytes(cpkListInputPath);
+        byte[] originalFileBytes = File.ReadAllBytes(cpkListInputPath);
+        byte[] fileBytes = originalFileBytes;
         bool wasEncrypted = false;
+        LogIgnoredJunkFiles();
+        var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
+        var userCustomPacks = FindCustomPacks(localFiles);
+        string outputModFolder = _options.OutputPath;
+        string destRoot = (_options.PackPlatform == DataClasses.Platform.SWITCH)
+             ? Path.Combine(outputModFolder, "romfs")
+             : outputModFolder;
+        string outputConfigPath = (_options.PackPlatform == DataClasses.Platform.SWITCH)
+            ? Path.Combine(outputModFolder, "romfs", "data", "cpk_list.cfg.bin")
+            : Path.Combine(outputModFolder, "data", "cpk_list.cfg.bin");
 
-        uint checkHeader = BitConverter.ToUInt32(fileBytes, 0);
-        if (checkHeader > 10000000)
+        outputConfigPath = outputConfigPath.Replace("\\", "/");
+        Directory.CreateDirectory(Path.GetDirectoryName(outputConfigPath)!);
+        var autoPackedAudio = BuildAutoPackedAudio(originalFileBytes, cpkListInputPath, localFiles, userCustomPacks);
+
+        if (CCpkListUtils.IsModernCpkList(originalFileBytes))
         {
-            wasEncrypted = true;
+            CLogger.LogInfo("Decrypting modern T2B config...");
+            if (!CCpkListUtils.TryPackModernCpkList(
+                    originalFileBytes,
+                    localFiles,
+                    _dirToPack,
+                    out var modernSavedBytes,
+                    CLogger.LogInfo,
+                    (current, total) => CGeneralUtils.ReportProgress(current, total, "Updating Config"),
+                    autoPackedAudio.CustomPackNames,
+                    autoPackedAudio.RedirectedPackNames))
+            {
+                CLogger.AddImportantInfo("Failed to update modern T2B cpk_list.cfg.bin.");
+                return;
+            }
+
+            CLogger.LogInfo("Re-encrypting modern T2B config...");
+            File.WriteAllBytes(outputConfigPath, modernSavedBytes);
+            goto CopyFiles;
+        }
+
+        if (!CCpkListUtils.TryGetCfgBinPayload(fileBytes, out fileBytes, out wasEncrypted))
+        {
+            CLogger.AddImportantInfo("Invalid CfgBin structure: No entries found.");
+            return;
+        }
+
+        if (wasEncrypted)
+        {
             CLogger.LogInfo("Decrypting config...");
-            CCriwareCrypt.DecryptBlock(fileBytes, 0, 0x1717E18E);
         }
 
         CfgBin cpkList = new CfgBin();
@@ -80,13 +122,13 @@ class CPack
 
             existingFileMap[fullPath] = i;
         }
-
-        var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
         
         Entry? templateEntry = cpkItems.Count > 0 ? cpkItems[cpkItems.Count - 1] : null;
 
         int processedCount = 0;
         int totalFiles = localFiles.Count;
+        var customPacks = new HashSet<string>(userCustomPacks, StringComparer.OrdinalIgnoreCase);
+        customPacks.UnionWith(autoPackedAudio.CustomPackNames);
 
         foreach (var file in localFiles)
         {
@@ -96,6 +138,7 @@ class CPack
             if (file.EndsWith("cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase)) continue;
 
             string relativePath = Path.GetRelativePath(_dirToPack, file).Replace("\\", "/");
+            if (IsCustomPack(relativePath)) continue;
             int size = (int)new FileInfo(file).Length;
 
             if (existingFileMap.TryGetValue(relativePath, out int entryIndex))
@@ -104,9 +147,23 @@ class CPack
                 
                 var entry = cpkItems[entryIndex];
                 
-                // Update for Loose File Mode
-                entry.Variables[2].Value = ""; // Clear CPK Dir
-                entry.Variables[3].Value = ""; // Clear CPK Name
+                string cpkName = Convert.ToString(entry.Variables[3].Value) ?? string.Empty;
+                if (autoPackedAudio.RedirectedPackNames.TryGetValue(cpkName, out var redirectedCpkName))
+                {
+                    entry.Variables[2].Value = "data/packs/";
+                    entry.Variables[3].Value = redirectedCpkName;
+                }
+                else if (customPacks.Contains(cpkName))
+                {
+                    entry.Variables[2].Value = "data/packs_custom/";
+                    entry.Variables[3].Value = cpkName;
+                }
+                else
+                {
+                    // Update for Loose File Mode
+                    entry.Variables[2].Value = ""; // Clear CPK Dir
+                    entry.Variables[3].Value = ""; // Clear CPK Name
+                }
                 entry.Variables[4].Value = size; // Update Size
             }
             else
@@ -137,14 +194,6 @@ class CPack
 
         cpkList.Entries[0].Variables[0].Value = cpkItems.Count;
 
-        string outputModFolder = _options.OutputPath;
-        string outputConfigPath = (_options.PackPlatform == DataClasses.Platform.SWITCH)
-            ? Path.Combine(outputModFolder, "romfs", "data", "cpk_list.cfg.bin")
-            : Path.Combine(outputModFolder, "data", "cpk_list.cfg.bin");
-
-        outputConfigPath = outputConfigPath.Replace("\\", "/");
-        Directory.CreateDirectory(Path.GetDirectoryName(outputConfigPath)!);
-
         byte[] savedBytes = cpkList.Save();
 
         if (wasEncrypted)
@@ -155,13 +204,14 @@ class CPack
 
         File.WriteAllBytes(outputConfigPath, savedBytes);
 
+    CopyFiles:
+        WriteAutoPackedAudio(destRoot, autoPackedAudio);
         CLogger.LogInfo("Copying files...");
 
-        string destRoot = (_options.PackPlatform == DataClasses.Platform.SWITCH)
-             ? Path.Combine(outputModFolder, "romfs")
-             : outputModFolder;
-
-        var filesToCopy = localFiles.Where(f => !f.EndsWith("data/cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase)).ToList();
+        var filesToCopy = localFiles
+            .Where(f => !f.EndsWith("data/cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !autoPackedAudio.SourceFiles.Contains(f))
+            .ToList();
 
         var distinctDirectories = filesToCopy
             .Select(f => Path.GetDirectoryName(Path.Combine(destRoot, Path.GetRelativePath(_dirToPack, f))))
@@ -195,5 +245,278 @@ class CPack
 
         CGeneralUtils.ReportProgress(0, 0, "");
         CLogger.LogInfo($"Done packing to `{outputModFolder.Replace("\\", "/")}`");
+    }
+
+    private static bool IsCustomPack(string relativePath)
+    {
+        return relativePath.StartsWith("data/packs_custom/", StringComparison.OrdinalIgnoreCase) &&
+               relativePath.EndsWith(".cpk", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private HashSet<string> FindCustomPacks(IReadOnlyList<string> localFiles)
+    {
+        var packs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var localFile in localFiles)
+        {
+            string relativePath = Path.GetRelativePath(_dirToPack, localFile).Replace("\\", "/");
+            if (IsCustomPack(relativePath))
+            {
+                packs.Add(Path.GetFileName(relativePath));
+            }
+        }
+
+        return packs;
+    }
+
+    private AutoPackedAudio BuildAutoPackedAudio(
+        byte[] cpkListBytes,
+        string cpkListInputPath,
+        IReadOnlyList<string> localFiles,
+        IReadOnlySet<string> userCustomPacks)
+    {
+        var result = new AutoPackedAudio();
+        if (!CCpkListUtils.TryReadEntries(cpkListBytes, out var entries))
+        {
+            return result;
+        }
+
+        var cpkByPath = entries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.CpkPath))
+            .ToDictionary(entry => NormalizeRelativePath(entry.FullPath), entry => entry.CpkPath, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var localFile in localFiles)
+        {
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(_dirToPack, localFile));
+            if (!IsAutoPackedAudioFile(relativePath) || !cpkByPath.TryGetValue(relativePath, out var cpkPath))
+            {
+                continue;
+            }
+
+            var cpkName = Path.GetFileName(cpkPath.Replace("\\", "/"));
+            if (string.IsNullOrWhiteSpace(cpkName) || userCustomPacks.Contains(cpkName))
+            {
+                continue;
+            }
+
+            if (!result.FilesByCpk.TryGetValue(cpkName, out var files))
+            {
+                files = new List<CpkFilePayload>();
+                result.FilesByCpk.Add(cpkName, files);
+            }
+
+            files.Add(new CpkFilePayload(relativePath, localFile));
+            result.SourceFiles.Add(localFile);
+            result.CustomPackNames.Add(cpkName);
+            result.OriginalCpkPaths.TryAdd(cpkName, ResolveOriginalCpkPath(cpkPath, cpkListInputPath));
+        }
+
+        return result;
+    }
+
+    private static void WriteAutoPackedAudio(string destRoot, AutoPackedAudio audio)
+    {
+        foreach (var (cpkName, files) in audio.FilesByCpk)
+        {
+            var outputPath = Path.Combine(destRoot, "data", "packs_custom", cpkName);
+            CLogger.LogInfo($"[Pack] data/packs_custom/{cpkName} ({files.Count} audio file(s), source {cpkName})");
+            var originalCpkPath = audio.OriginalCpkPaths.GetValueOrDefault(cpkName);
+            WriteEncryptedAutoPack(outputPath, files, originalCpkPath);
+        }
+    }
+
+    private static void WriteEncryptedAutoPack(string outputPath, IReadOnlyList<CpkFilePayload> files, string? originalCpkPath)
+    {
+        var tempPath = outputPath + ".tmp";
+        var decryptedOriginalPath = tempPath + ".original";
+
+        if (!string.IsNullOrWhiteSpace(originalCpkPath) && File.Exists(originalCpkPath))
+        {
+            CLogger.LogInfo($"[Pack] Using original CPK template: {Path.GetFileName(originalCpkPath)}");
+            DecryptCpkIfNeeded(originalCpkPath, decryptedOriginalPath);
+            var replacements = files.ToDictionary(file => NormalizeRelativePath(file.RelativePath), file => file.SourcePath, StringComparer.OrdinalIgnoreCase);
+            CAudioCpkRebuilder.Write(decryptedOriginalPath, tempPath, replacements, Path.GetDirectoryName(tempPath)!);
+        }
+        else
+        {
+            CLogger.AddImportantInfo($"Original CPK not found for {Path.GetFileName(outputPath)}. Falling back to compact audio CPK.");
+            CCriCpkWriter.Write(tempPath, files);
+        }
+
+        try
+        {
+            var key = CCriwareCrypt.CalculateFilenameKey(Path.GetFileName(outputPath));
+            DeleteExistingOutput(outputPath);
+            using var input = File.OpenRead(tempPath);
+            using var output = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            CCriwareCrypt.ProcessStream(input, output, key);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+
+            if (File.Exists(decryptedOriginalPath))
+            {
+                File.Delete(decryptedOriginalPath);
+            }
+        }
+    }
+
+    private static void DeleteExistingOutput(string outputPath)
+    {
+        if (!File.Exists(outputPath))
+        {
+            return;
+        }
+
+        CLogger.LogInfo($"[Pack] Overwriting existing CPK: {Path.GetFileName(outputPath)}");
+        File.SetAttributes(outputPath, FileAttributes.Normal);
+        File.Delete(outputPath);
+    }
+
+    private static void DecryptCpkIfNeeded(string sourcePath, string targetPath)
+    {
+        using var source = File.OpenRead(sourcePath);
+        Span<byte> magic = stackalloc byte[4];
+        source.ReadExactly(magic);
+        source.Position = 0;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        using var target = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 1024);
+        if (magic.SequenceEqual("CPK "u8))
+        {
+            source.CopyTo(target);
+            return;
+        }
+
+        var key = CCriwareCrypt.CalculateFilenameKey(Path.GetFileName(sourcePath));
+        CCriwareCrypt.ProcessStream(source, target, key);
+    }
+
+    private string? ResolveOriginalCpkPath(string cpkPath, string cpkListInputPath)
+    {
+        var normalizedCpkPath = NormalizeRelativePath(cpkPath);
+        var candidates = new List<string>();
+
+        candidates.Add(Path.Combine(_dirToPack, normalizedCpkPath));
+
+        var cpkListDir = Path.GetDirectoryName(cpkListInputPath);
+        if (!string.IsNullOrWhiteSpace(cpkListDir))
+        {
+            candidates.Add(Path.Combine(cpkListDir, normalizedCpkPath));
+            if (Path.GetFileName(cpkListDir).Equals("data", StringComparison.OrdinalIgnoreCase))
+            {
+                var gameRoot = Path.GetDirectoryName(cpkListDir);
+                if (!string.IsNullOrWhiteSpace(gameRoot))
+                {
+                    candidates.Add(Path.Combine(gameRoot, normalizedCpkPath));
+                }
+            }
+
+            if (normalizedCpkPath.StartsWith("data/", StringComparison.OrdinalIgnoreCase))
+            {
+                candidates.Add(Path.Combine(cpkListDir, normalizedCpkPath[5..]));
+            }
+        }
+
+        var cpkName = Path.GetFileName(normalizedCpkPath);
+        candidates.AddRange(GetKnownGameCpkCandidates(cpkName));
+
+        foreach (var candidate in candidates.Select(path => path.Replace("\\", "/")).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> GetKnownGameCpkCandidates(string cpkName)
+    {
+        var relative = Path.Combine("steamapps", "common", "INAZUMA ELEVEN Victory Road", "data", "packs", cpkName);
+        var roots = new List<string>();
+
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+        if (!string.IsNullOrWhiteSpace(programFilesX86))
+        {
+            roots.Add(Path.Combine(programFilesX86, "Steam"));
+        }
+
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        if (!string.IsNullOrWhiteSpace(programFiles))
+        {
+            roots.Add(Path.Combine(programFiles, "Steam"));
+        }
+
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(home))
+        {
+            roots.Add(Path.Combine(home, "Library", "Application Support", "Steam"));
+            roots.Add(Path.Combine(home, ".steam", "steam"));
+            roots.Add(Path.Combine(home, ".local", "share", "Steam"));
+        }
+
+        if (Directory.Exists("/Volumes"))
+        {
+            foreach (var volume in Directory.EnumerateDirectories("/Volumes"))
+            {
+                roots.Add(Path.Combine(volume, "Applications", "Steam"));
+            }
+        }
+
+        foreach (var root in roots)
+        {
+            yield return Path.Combine(root, relative);
+        }
+    }
+
+    private static bool IsAutoPackedAudioFile(string relativePath)
+    {
+        return relativePath.StartsWith("data/common/sound_asset/", StringComparison.OrdinalIgnoreCase) &&
+               (relativePath.EndsWith(".acb", StringComparison.OrdinalIgnoreCase) ||
+                relativePath.EndsWith(".awb", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeRelativePath(string path)
+    {
+        return path.Replace("\\", "/");
+    }
+
+    private void LogIgnoredJunkFiles()
+    {
+        var ignored = Directory.EnumerateFiles(_dirToPack, "*", SearchOption.AllDirectories)
+            .Where(CGeneralUtils.IsJunkFile)
+            .Select(file => Path.GetRelativePath(_dirToPack, file).Replace("\\", "/"))
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (ignored.Count == 0)
+        {
+            return;
+        }
+
+        CLogger.LogInfo($"Ignoring {ignored.Count} junk file(s).");
+        foreach (var file in ignored.Take(5))
+        {
+            CLogger.LogInfo($"[Ignore] {file}");
+        }
+
+        if (ignored.Count > 5)
+        {
+            CLogger.LogInfo($"[Ignore] ... {ignored.Count - 5} more");
+        }
+    }
+
+    private sealed class AutoPackedAudio
+    {
+        public Dictionary<string, List<CpkFilePayload>> FilesByCpk { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string?> OriginalCpkPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, string> RedirectedPackNames { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> SourceFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> CustomPackNames { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 }
