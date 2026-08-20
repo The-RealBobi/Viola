@@ -192,6 +192,14 @@ class CPack
             }
         }
 
+        var sortedCpkItems = cpkItems
+            .OrderBy(item => CCpkListUtils.GetCpkListEntryIndex(
+                (Convert.ToString(item.Variables[0].Value) ?? string.Empty) +
+                (Convert.ToString(item.Variables[1].Value) ?? string.Empty)))
+            .ToList();
+        cpkItems.Clear();
+        cpkItems.AddRange(sortedCpkItems);
+
         cpkList.Entries[0].Variables[0].Value = cpkItems.Count;
 
         byte[] savedBytes = cpkList.Save();

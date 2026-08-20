@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Tinifan.Level5.Binary;
 using Viola.Core.EncryptDecrypt.Logic.Utils;
+using Viola.Core.Utils.General.Logic;
 
 namespace Viola.Core.Utils.CpkList.Logic;
 
@@ -192,6 +193,7 @@ public static class CCpkListUtils
             }
         }
 
+        SortT2bCpkListEntriesByIndex(file);
         UpdateT2bCountEntry(file);
         var packedBytes = WriteT2bFile(file);
         encryptedBytes = EncryptModern(packedBytes);
@@ -499,6 +501,45 @@ public static class CCpkListUtils
         {
             firstEntry.Values[0] = file.Entries.Count(entry => IsCpkListEntry(entry));
         }
+    }
+
+    internal static uint GetCpkListEntryIndex(string fullPath)
+    {
+        return CGeneralUtils.ComputeCRC32(fullPath);
+    }
+
+    private static void SortT2bCpkListEntriesByIndex(T2bFile file)
+    {
+        var fileEntryIndexes = new List<int>();
+        var sortedFileEntries = new List<T2bRawEntry>();
+
+        for (int index = 0; index < file.Entries.Count; index++)
+        {
+            var entry = file.Entries[index];
+            if (!IsCpkListEntry(entry))
+            {
+                continue;
+            }
+
+            fileEntryIndexes.Add(index);
+            sortedFileEntries.Add(entry);
+        }
+
+        sortedFileEntries = sortedFileEntries
+            .OrderBy(entry => GetCpkListEntryIndex(GetT2bFullPath(file, entry)))
+            .ToList();
+
+        for (int index = 0; index < fileEntryIndexes.Count; index++)
+        {
+            file.Entries[fileEntryIndexes[index]] = sortedFileEntries[index];
+        }
+    }
+
+    private static string GetT2bFullPath(T2bFile file, T2bRawEntry entry)
+    {
+        string dir = entry.PendingDir ?? ReadT2bString(file.StringData, entry.Values[0]);
+        string name = entry.PendingName ?? ReadT2bString(file.StringData, entry.Values[1]);
+        return dir + name;
     }
 
     private static bool IsT2b(byte[] bytes)
