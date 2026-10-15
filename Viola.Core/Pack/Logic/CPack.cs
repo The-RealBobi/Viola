@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text;
 using Tinifan.Level5.Binary;
 using Tinifan.Level5.Binary.Logic;
 using Viola.Core.Launcher.DataClasses;
@@ -55,6 +57,7 @@ class CPack
         bool wasEncrypted = false;
         LogIgnoredJunkFiles();
         var localFiles = CGeneralUtils.GetAllFilesWithNormalSlash(_dirToPack);
+        using var feedback = new PackFeedback(localFiles.Count);
         var userCustomPacks = FindCustomPacks(localFiles);
         string outputModFolder = _options.OutputPath;
         string destRoot = (_options.PackPlatform == DataClasses.Platform.NintendoSwitch)
@@ -76,8 +79,8 @@ class CPack
                     localFiles,
                     _dirToPack,
                     out var modernSavedBytes,
-                    CLogger.LogInfo,
-                    (current, total) => CGeneralUtils.ReportProgress(current, total, "Updating Config"),
+                    feedback.LogFile,
+                    (current, total) => feedback.ReportProgress(current, total, "Updating Config"),
                     autoPackedAudio.CustomPackNames,
                     autoPackedAudio.RedirectedPackNames,
                     autoPackedAudio.CpkEntries))
@@ -86,6 +89,7 @@ class CPack
                 return;
             }
 
+            feedback.Flush();
             CLogger.LogInfo("Re-encrypting modern T2B config...");
             File.WriteAllBytes(outputConfigPath, modernSavedBytes);
             goto CopyFiles;
@@ -165,7 +169,7 @@ class CPack
         foreach (var file in localFiles)
         {
             processedCount++;
-            CGeneralUtils.ReportProgress(processedCount, totalFiles, "Updating Config");
+            feedback.ReportProgress(processedCount, totalFiles, "Updating Config");
 
             if (file.EndsWith("cpk_list.cfg.bin", StringComparison.OrdinalIgnoreCase)) continue;
 
@@ -175,7 +179,7 @@ class CPack
 
             if (existingFileMap.TryGetValue(relativePath, out int entryIndex))
             {
-                CLogger.LogInfo($"[Update] {relativePath}");
+                feedback.LogFile($"[Update] {relativePath}");
                 
                 var entry = cpkItems[entryIndex];
                 string cpkName = "";
@@ -239,7 +243,7 @@ class CPack
             }
             else
             {
-                CLogger.LogInfo($"[Add] {relativePath}");
+                feedback.LogFile($"[Add] {relativePath}");
 
                 if (templateEntry == null)
                 {
@@ -277,6 +281,7 @@ class CPack
             }
         }
         
+        feedback.Flush();
         if(cpkListMode == CpkListStructure.New)
         {
             var sortedCpkItems = cpkItems
@@ -335,12 +340,60 @@ class CPack
             lock (lockObj)
             {
                 copiedCount++;
-                CGeneralUtils.ReportProgress(copiedCount, totalFilesToCopy, "Copying Files");
+                feedback.ReportProgress(copiedCount, totalFilesToCopy, "Copying Files");
             }
         });
 
         CGeneralUtils.ReportProgress(0, 0, "");
         CLogger.LogInfo($"Done packing to `{outputModFolder.Replace("\\", "/")}`");
+    }
+
+    private sealed class PackFeedback : IDisposable
+    {
+        private readonly StringBuilder _messages = new();
+        private readonly bool _logFiles;
+        private long _lastProgress;
+        private long _lastLog;
+        private string _phase = string.Empty;
+
+        public PackFeedback(int fileCount)
+        {
+            _logFiles = fileCount < 500;
+        }
+
+        public void LogFile(string message)
+        {
+            if (!_logFiles) return;
+            _messages.AppendLine(message);
+            long now = Stopwatch.GetTimestamp();
+            if (_messages.Length >= 65536 || Stopwatch.GetElapsedTime(_lastLog, now).TotalMilliseconds >= 100)
+            {
+                Flush();
+            }
+        }
+
+        public void ReportProgress(long current, long total, string phase)
+        {
+            // Copy workers call this under the existing progress counter lock.
+            long now = Stopwatch.GetTimestamp();
+            if (phase != _phase || current == total ||
+                Stopwatch.GetElapsedTime(_lastProgress, now).TotalMilliseconds >= 100)
+            {
+                _phase = phase;
+                _lastProgress = now;
+                CGeneralUtils.ReportProgress(current, total, phase);
+            }
+        }
+
+        public void Flush()
+        {
+            if (_messages.Length == 0) return;
+            CLogger.LogInfo(_messages.ToString().TrimEnd('\r', '\n'));
+            _messages.Clear();
+            _lastLog = Stopwatch.GetTimestamp();
+        }
+
+        public void Dispose() => Flush();
     }
 
     private static bool IsCustomPack(string relativePath)
@@ -371,6 +424,11 @@ class CPack
         IReadOnlySet<string> userCustomPacks)
     {
         var result = new AutoPackedAudio();
+        if (!localFiles.Any(file => IsAutoPackedAudioFile(
+                NormalizeRelativePath(Path.GetRelativePath(_dirToPack, file)))))
+        {
+            return result;
+        }
         if (!CCpkListUtils.TryReadEntries(cpkListBytes, out var entries))
         {
             return result;
